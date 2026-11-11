@@ -3,8 +3,11 @@ project(NetDialogTest C)
 
 add_executable(${PROJECT_NAME} main.c)
 
-# Wi-Fi・ネットワーク・ダイアログ・GU描画に必要なライブラリ群
+# mbedTLS関連のライブラリを追加（リンク順が重要）
 target_link_libraries(${PROJECT_NAME}
+    mbedtls
+    mbedx509
+    mbedcrypto
     pspgu
     pspdisplay
     pspge
@@ -16,8 +19,7 @@ target_link_libraries(${PROJECT_NAME}
     pspdebug
 )
 
-# EBOOT.PBPを生成するマクロ
 create_pbp_file(
     TARGET ${PROJECT_NAME}
-    TITLE "Wi-Fi Dialog Test"
+    TITLE "GitHub TLS 1.3 Test"
 )
