@@ -155,26 +155,32 @@ int resolve_hostname_psp(const char *hostname, char *ip_str_out, size_t max_len)
     if (!ip) return -1;
 
     strncpy(ip_str_out, ip, max_len - 1);
-    ip_str_out[max_len - 1] = '\0';
+    *(ip_str_out + max_len - 1) = '\0';
     return 0;
 }
 
 void fetch_github_tls(void) {
-    const char *server_name = "://githubusercontent.com";
-    const char *server_port = "443";
-    const char *request =
-        "GET /PSP-Archive/ARK-4/main/README.md HTTP/1.1\r\n"
-        "Host: ://githubusercontent.com\r\n"
-        "User-Agent: PSP-Store/1.0\r\n"
-        "Connection: close\r\n\r\n";
-
+    char *server_name = (char *)calloc(1, 128);
+    char *request = (char *)calloc(1, 512);
     char *ip_str = (char *)calloc(1, 64);
-    if (!ip_str) return;
+    if (!server_name || !request || !ip_str) return;
 
-    printf("Resolving DNS for %s...\n", server_name);
+    // ブラウザや翻訳によるURL自動書き換えを100%防ぐ組み立て
+    sprintf(server_name, "%s.%s.%s", "raw", "githubusercontent", "com");
+    const char *server_port = "443";
+
+    sprintf(request,
+        "GET /PSP-Archive/ARK-4/main/README.md HTTP/1.1\r\n"
+        "Host: %s\r\n"
+        "User-Agent: PSP-Store/1.0\r\n"
+        "Connection: close\r\n\r\n", server_name);
+
+    printf("Resolving DNS for [%s]...\n", server_name);
     int dns_res = resolve_hostname_psp(server_name, ip_str, 64);
     if (dns_res < 0) {
         printf("ERROR: DNS failed (0x%08X)\n", dns_res);
+        free(server_name);
+        free(request);
         free(ip_str);
         return;
     }
@@ -249,6 +255,8 @@ void fetch_github_tls(void) {
     mbedtls_ssl_close_notify(&ssl);
 
 cleanup:
+    free(server_name);
+    free(request);
     free(ip_str);
     mbedtls_net_free(&server_fd);
     mbedtls_ssl_free(&ssl);
@@ -271,7 +279,7 @@ int main(void) {
 
     sceGuTerm();
     pspDebugScreenInit();
-    printf("PSP Store [v3] - Universal-Updater style\n\n");
+    printf("PSP Store [v4] - Universal-Updater style\n\n");
 
     if (net_err != 0) {
         printf("Network Init Error: 0x%08X\n", net_err);
