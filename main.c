@@ -7,7 +7,8 @@
 #include <pspnet_apctl.h>
 #include <pspnet_resolver.h>
 #include <pspdebug.h>
-#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,17 +146,17 @@ int resolve_hostname_psp(const char *hostname, char *ip_str_out, size_t max_len)
     }
 
     struct in_addr addr;
+    memset(&addr, 0, sizeof(addr));
     res = sceNetResolverStartNtoA(rid, hostname, &addr, 2, 3);
     sceNetResolverDelete(rid);
     free(buf);
 
     if (res < 0) return res;
 
-    const char *ip = inet_ntoa(addr);
-    if (!ip) return -1;
-
-    strncpy(ip_str_out, ip, max_len - 1);
-    *(ip_str_out + max_len - 1) = '\0';
+    // PSPネイティブ関数でIPバイナリを正しいドット表記文字列に変換する
+    if (sceNetInetInetNtop(AF_INET, &addr, ip_str_out, max_len) == NULL) {
+        return -1;
+    }
     return 0;
 }
 
@@ -165,7 +166,6 @@ void fetch_github_tls(void) {
     char *ip_str = (char *)calloc(1, 64);
     if (!server_name || !request || !ip_str) return;
 
-    // ブラウザや翻訳によるURL自動書き換えを100%防ぐ組み立て
     sprintf(server_name, "%s.%s.%s", "raw", "githubusercontent", "com");
     const char *server_port = "443";
 
@@ -279,7 +279,7 @@ int main(void) {
 
     sceGuTerm();
     pspDebugScreenInit();
-    printf("PSP Store [v4] - Universal-Updater style\n\n");
+    printf("PSP Store [v5] - Universal-Updater style\n\n");
 
     if (net_err != 0) {
         printf("Network Init Error: 0x%08X\n", net_err);
