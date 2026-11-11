@@ -153,10 +153,9 @@ int resolve_hostname_psp(const char *hostname, char *ip_str_out, size_t max_len)
 
     if (res < 0) return res;
 
-    // PSPネイティブ関数でIPバイナリを正しいドット表記文字列に変換する
-    if (sceNetInetInetNtop(AF_INET, &addr, ip_str_out, max_len) == NULL) {
-        return -1;
-    }
+    // IPv4バイナリ（4バイト）を直接ドット表記文字列に変換（100%確実）
+    unsigned char *b = (unsigned char *)&addr.s_addr;
+    snprintf(ip_str_out, max_len, "%u.%u.%u.%u", *b, *(b + 1), *(b + 2), *(b + 3));
     return 0;
 }
 
@@ -279,7 +278,7 @@ int main(void) {
 
     sceGuTerm();
     pspDebugScreenInit();
-    printf("PSP Store [v5] - Universal-Updater style\n\n");
+    printf("PSP Store [v6] - Universal-Updater style\n\n");
 
     if (net_err != 0) {
         printf("Network Init Error: 0x%08X\n", net_err);
