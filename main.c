@@ -9,6 +9,8 @@
 #include <pspdebug.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <malloc.h>
 
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
@@ -19,7 +21,7 @@ PSP_MODULE_INFO("PSPStore", 0, 1, 1);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 PSP_HEAP_SIZE_KB(12 * 1024);
 
-static unsigned int __attribute__((aligned(16))) list;
+static unsigned int *list = NULL;
 #define BUF_WIDTH (512)
 #define SCR_WIDTH (480)
 #define SCR_HEIGHT (272)
@@ -45,8 +47,10 @@ void setup_callbacks(void) {
     if (thid >= 0) sceKernelStartThread(thid, 0, 0);
 }
 
-// ダイアログ専用GU初期化（pspDebugScreenより前に独立して動かす）
 void init_gu(void) {
+    if (!list) {
+        list = (unsigned int *)memalign(16, 262144);
+    }
     sceGuInit();
     sceGuStart(GU_DIRECT, list);
     sceGuDrawBuffer(GU_PSM_8888, (void*)0, BUF_WIDTH);
@@ -73,7 +77,7 @@ int init_network(void) {
     if (res < 0) return res;
     res = sceNetInetInit();
     if (res < 0) return res;
-    res = sceNetResolverInit(); // DNS名前解決の初期化も追加
+    res = sceNetResolverInit();
     if (res < 0) return res;
     res = sceNetApctlInit(0x8000, 48);
     if (res < 0) return res;
@@ -192,11 +196,15 @@ void fetch_github_tls(void) {
 
     mbedtls_ssl_write(&ssl, (const unsigned char *)request, strlen(request));
 
-    unsigned char buf;
-    memset(buf, 0, sizeof(buf));
-    ret = mbedtls_ssl_read(&ssl, buf, sizeof(buf) - 1);
-    if (ret > 0) {
-        printf("Response:\n%s\n", buf);
+    unsigned char *buf = (unsigned char *)calloc(1, 512);
+    if (buf) {
+        ret = mbedtls_ssl_read(&ssl, buf, 511);
+        if (ret > 0) {
+            printf("Response:\n%s\n", buf);
+        } else {
+            printf("Read error or empty: -0x%x\n", -ret);
+        }
+        free(buf);
     }
 
     mbedtls_ssl_close_notify(&ssl);
@@ -221,7 +229,6 @@ int main(void) {
         dialog_res = show_net_dialog(&dialog_err);
     }
 
-    // ダイアログ処理が完全に終わってからデバッグスクリーンを開始！
     sceGuTerm();
     pspDebugScreenInit();
     printf("PSP Store - Universal-Updater style for PSP-1000\n\n");
