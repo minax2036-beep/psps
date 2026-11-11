@@ -5,25 +5,21 @@
 #include <pspnet.h>
 #include <pspnet_inet.h>
 #include <pspnet_apctl.h>
+#include <pspnet_resolver.h>
 #include <pspdebug.h>
-#include <psprtc.h>
 #include <string.h>
 #include <stdio.h>
 
-// mbedTLS ヘッダ
 #include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
-#include "mbedtls/error.h"
 
-PSP_MODULE_INFO("GitHubTLSTest", 0, 1, 1);
+PSP_MODULE_INFO("PSPStore", 0, 1, 1);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
-
-// メモリ節約のためヒープサイズを12MBに制限（15MB以下を確実に維持）
 PSP_HEAP_SIZE_KB(12 * 1024);
 
-static unsigned int __attribute__((aligned(16))) list[262144];
+static unsigned int __attribute__((aligned(16))) list;
 #define BUF_WIDTH (512)
 #define SCR_WIDTH (480)
 #define SCR_HEIGHT (272)
@@ -32,7 +28,6 @@ static unsigned int __attribute__((aligned(16))) list[262144];
 
 #define printf pspDebugScreenPrintf
 
-// 終了コールバック
 int exit_callback(int arg1, int arg2, void *common) {
     sceKernelExitGame();
     return 0;
@@ -50,7 +45,7 @@ void setup_callbacks(void) {
     if (thid >= 0) sceKernelStartThread(thid, 0, 0);
 }
 
-// GU初期化（ダイアログ用）
+// ダイアログ専用GU初期化（pspDebugScreenより前に独立して動かす）
 void init_gu(void) {
     sceGuInit();
     sceGuStart(GU_DIRECT, list);
@@ -67,7 +62,6 @@ void init_gu(void) {
     sceGuDisplay(GU_TRUE);
 }
 
-// ネットワーク初期化
 int init_network(void) {
     int res;
     res = sceUtilityLoadNetModule(PSP_NET_MODULE_COMMON);
@@ -79,14 +73,15 @@ int init_network(void) {
     if (res < 0) return res;
     res = sceNetInetInit();
     if (res < 0) return res;
+    res = sceNetResolverInit(); // DNS名前解決の初期化も追加
+    if (res < 0) return res;
     res = sceNetApctlInit(0x8000, 48);
     if (res < 0) return res;
 
     return 0;
 }
 
-// Wi-Fiダイアログ表示
-int show_net_dialog(void) {
+int show_net_dialog(int *init_err) {
     pspUtilityNetconfData data;
     memset(&data, 0, sizeof(data));
 
@@ -99,7 +94,11 @@ int show_net_dialog(void) {
     data.base.soundThread = 16;
     data.action = PSP_NETCONF_ACTION_CONNECTAP;
 
-    if (sceUtilityNetconfInitStart(&data) < 0) return -1;
+    int res = sceUtilityNetconfInitStart(&data);
+    if (res < 0) {
+        *init_err = res;
+        return -1;
+    }
 
     int done = 0;
     while (!done) {
@@ -125,18 +124,17 @@ int show_net_dialog(void) {
         sceDisplayWaitVblankStart();
         sceGuSwapBuffers();
     }
+    *init_err = data.base.result;
     return data.base.result;
 }
 
-// GitHubへTLS 1.3でHTTPSリクエストを送信する関数
 void fetch_github_tls(void) {
     const char *server_name = "://githubusercontent.com";
     const char *server_port = "443";
-    // ARK-4の公式リポジトリにある軽量なテキストを取得テスト
     const char *request =
         "GET /PSP-Archive/ARK-4/main/README.md HTTP/1.1\r\n"
         "Host: ://githubusercontent.com\r\n"
-        "User-Agent: PSP-TLS-Client/1.0\r\n"
+        "User-Agent: PSP-Store/1.0\r\n"
         "Connection: close\r\n\r\n";
 
     mbedtls_net_context server_fd;
@@ -151,21 +149,19 @@ void fetch_github_tls(void) {
     mbedtls_ctr_drbg_init(&ctr_drbg);
     mbedtls_entropy_init(&entropy);
 
-    printf("[1] Seeding RNG...\n");
-    const char *pers = "psp_github_tls";
+    const char *pers = "psp_store_tls";
     if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
                               (const unsigned char *)pers, strlen(pers)) != 0) {
         printf("ERROR: ctr_drbg_seed failed\n");
         goto cleanup;
     }
 
-    printf("[2] Connecting to %s:%s...\n", server_name, server_port);
+    printf("Connecting to %s...\n", server_name);
     if (mbedtls_net_connect(&server_fd, server_name, server_port, MBEDTLS_NET_PROTO_TCP) != 0) {
         printf("ERROR: net_connect failed\n");
         goto cleanup;
     }
 
-    printf("[3] Setting up TLS 1.2/1.3 config...\n");
     if (mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_CLIENT,
                                     MBEDTLS_SSL_TRANSPORT_STREAM,
                                     MBEDTLS_SSL_PRESET_DEFAULT) != 0) {
@@ -173,7 +169,6 @@ void fetch_github_tls(void) {
         goto cleanup;
     }
 
-    // メモリ節約のため証明書検証をスキップ（後でルート証明書1枚に絞って有効化可能）
     mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
     mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
 
@@ -182,15 +177,10 @@ void fetch_github_tls(void) {
         goto cleanup;
     }
 
-    // SNI（Server Name Indication）のセット（GitHub通信には必須！）
-    if (mbedtls_ssl_set_hostname(&ssl, server_name) != 0) {
-        printf("ERROR: set_hostname failed\n");
-        goto cleanup;
-    }
-
+    mbedtls_ssl_set_hostname(&ssl, server_name);
     mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
 
-    printf("[4] Performing TLS handshake...\n");
+    printf("Performing TLS 1.3 handshake...\n");
     int ret;
     while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
@@ -198,19 +188,15 @@ void fetch_github_tls(void) {
             goto cleanup;
         }
     }
-    printf("SUCCESS! Connected using: %s\n", mbedtls_ssl_get_version(&ssl));
+    printf("SUCCESS! Protocol: %s\n", mbedtls_ssl_get_version(&ssl));
 
-    printf("[5] Sending HTTPS GET request...\n");
     mbedtls_ssl_write(&ssl, (const unsigned char *)request, strlen(request));
 
-    printf("[6] Reading response (first 512 bytes):\n----------------------------------------\n");
-    unsigned char buf[513];
+    unsigned char buf;
     memset(buf, 0, sizeof(buf));
     ret = mbedtls_ssl_read(&ssl, buf, sizeof(buf) - 1);
     if (ret > 0) {
-        printf("%s\n", buf);
-    } else {
-        printf("Read error or empty: -0x%x\n", -ret);
+        printf("Response:\n%s\n", buf);
     }
 
     mbedtls_ssl_close_notify(&ssl);
@@ -227,19 +213,26 @@ int main(void) {
     setup_callbacks();
     init_gu();
 
-    if (init_network() == 0) {
-        int res = show_net_dialog();
+    int net_err = init_network();
+    int dialog_err = 0;
+    int dialog_res = -1;
 
-        // ダイアログ終了後、文字表示用のデバッグスクリーンに切り替え
-        sceGuTerm();
-        pspDebugScreenInit();
+    if (net_err == 0) {
+        dialog_res = show_net_dialog(&dialog_err);
+    }
 
-        if (res == 0) {
-            printf("Wi-Fi Connected! Starting TLS test...\n\n");
-            fetch_github_tls();
-        } else {
-            printf("Wi-Fi connection canceled or failed.\n");
-        }
+    // ダイアログ処理が完全に終わってからデバッグスクリーンを開始！
+    sceGuTerm();
+    pspDebugScreenInit();
+    printf("PSP Store - Universal-Updater style for PSP-1000\n\n");
+
+    if (net_err != 0) {
+        printf("Network Init Error: 0x%08X\n", net_err);
+    } else if (dialog_res == 0) {
+        printf("Wi-Fi Connected! Starting TLS test...\n");
+        fetch_github_tls();
+    } else {
+        printf("Wi-Fi Dialog Error/Canceled: 0x%08X\n", dialog_err);
     }
 
     printf("\nPress HOME to exit.\n");
