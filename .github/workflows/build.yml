@@ -1,0 +1,28 @@
+name: Build PSP EBOOT
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: pspdev/pspdev:latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: psp-cmake -B build
+
+      - name: Build EBOOT.PBP
+        run: cmake --build build
+
+      - name: Upload EBOOT.PBP
+        uses: actions/upload-artifact@v4
+        with:
+          name: psp-wifi-dialog-test
+          path: build/EBOOT.PBP
