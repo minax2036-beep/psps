@@ -7,6 +7,7 @@
 #include <pspnet_apctl.h>
 #include <pspnet_resolver.h>
 #include <pspdebug.h>
+#include <arpa/inet.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -132,6 +133,32 @@ int show_net_dialog(int *init_err) {
     return data.base.result;
 }
 
+int resolve_hostname_psp(const char *hostname, char *ip_str_out, size_t max_len) {
+    int rid = -1;
+    void *buf = malloc(1024);
+    if (!buf) return -1;
+
+    int res = sceNetResolverCreate(&rid, buf, 1024);
+    if (res < 0) {
+        free(buf);
+        return res;
+    }
+
+    struct in_addr addr;
+    res = sceNetResolverStartNtoA(rid, hostname, &addr, 2, 3);
+    sceNetResolverDelete(rid);
+    free(buf);
+
+    if (res < 0) return res;
+
+    const char *ip = inet_ntoa(addr);
+    if (!ip) return -1;
+
+    strncpy(ip_str_out, ip, max_len - 1);
+    ip_str_out[max_len - 1] = '\0';
+    return 0;
+}
+
 void fetch_github_tls(void) {
     const char *server_name = "://githubusercontent.com";
     const char *server_port = "443";
@@ -140,6 +167,18 @@ void fetch_github_tls(void) {
         "Host: ://githubusercontent.com\r\n"
         "User-Agent: PSP-Store/1.0\r\n"
         "Connection: close\r\n\r\n";
+
+    char *ip_str = (char *)calloc(1, 64);
+    if (!ip_str) return;
+
+    printf("Resolving DNS for %s...\n", server_name);
+    int dns_res = resolve_hostname_psp(server_name, ip_str, 64);
+    if (dns_res < 0) {
+        printf("ERROR: DNS failed (0x%08X)\n", dns_res);
+        free(ip_str);
+        return;
+    }
+    printf("Resolved IP: %s\n", ip_str);
 
     mbedtls_net_context server_fd;
     mbedtls_entropy_context entropy;
@@ -160,9 +199,10 @@ void fetch_github_tls(void) {
         goto cleanup;
     }
 
-    printf("Connecting to %s...\n", server_name);
-    if (mbedtls_net_connect(&server_fd, server_name, server_port, MBEDTLS_NET_PROTO_TCP) != 0) {
-        printf("ERROR: net_connect failed\n");
+    printf("Connecting TCP to %s:%s...\n", ip_str, server_port);
+    int ret = mbedtls_net_connect(&server_fd, ip_str, server_port, MBEDTLS_NET_PROTO_TCP);
+    if (ret != 0) {
+        printf("ERROR: net_connect failed (-0x%x)\n", -ret);
         goto cleanup;
     }
 
@@ -185,7 +225,6 @@ void fetch_github_tls(void) {
     mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
 
     printf("Performing TLS 1.3 handshake...\n");
-    int ret;
     while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             printf("ERROR: handshake failed (-0x%x)\n", -ret);
@@ -210,6 +249,7 @@ void fetch_github_tls(void) {
     mbedtls_ssl_close_notify(&ssl);
 
 cleanup:
+    free(ip_str);
     mbedtls_net_free(&server_fd);
     mbedtls_ssl_free(&ssl);
     mbedtls_ssl_config_free(&conf);
@@ -231,7 +271,7 @@ int main(void) {
 
     sceGuTerm();
     pspDebugScreenInit();
-    printf("PSP Store - Universal-Updater style for PSP-1000\n\n");
+    printf("PSP Store [v3] - Universal-Updater style\n\n");
 
     if (net_err != 0) {
         printf("Network Init Error: 0x%08X\n", net_err);
