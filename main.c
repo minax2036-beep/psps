@@ -9,12 +9,12 @@
 #include <pspdebug.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <errno.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <malloc.h>
 
-#include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
@@ -134,7 +134,8 @@ int show_net_dialog(int *init_err) {
     return data.base.result;
 }
 
-int resolve_hostname_psp(const char *hostname, char *ip_str_out, size_t max_len) {
+// PSPネイティブDNSリゾルバ（struct in_addr を直接返す）
+int resolve_hostname_addr(const char *hostname, struct in_addr *out_addr) {
     int rid = -1;
     void *buf = malloc(1024);
     if (!buf) return -1;
@@ -145,28 +146,44 @@ int resolve_hostname_psp(const char *hostname, char *ip_str_out, size_t max_len)
         return res;
     }
 
-    struct in_addr addr;
-    memset(&addr, 0, sizeof(addr));
-    res = sceNetResolverStartNtoA(rid, hostname, &addr, 2, 3);
+    memset(out_addr, 0, sizeof(struct in_addr));
+    res = sceNetResolverStartNtoA(rid, hostname, out_addr, 2, 3);
     sceNetResolverDelete(rid);
     free(buf);
 
-    if (res < 0) return res;
+    return res;
+}
 
-    // IPv4バイナリ（4バイト）を直接ドット表記文字列に変換（100%確実）
-    unsigned char *b = (unsigned char *)&addr.s_addr;
-    snprintf(ip_str_out, max_len, "%u.%u.%u.%u", *b, *(b + 1), *(b + 2), *(b + 3));
-    return 0;
+// mbedTLS用のPSPネイティブ送信コールバック
+int psp_bio_send(void *ctx, const unsigned char *buf, size_t len) {
+    int sock = *((int *)ctx);
+    int ret = sceNetInetSend(sock, buf, len, 0);
+    if (ret < 0) {
+        int err = sceNetInetGetErrno();
+        if (err == EAGAIN || err == EWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_WRITE;
+        return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+    }
+    return ret;
+}
+
+// mbedTLS用のPSPネイティブ受信コールバック
+int psp_bio_recv(void *ctx, unsigned char *buf, size_t len) {
+    int sock = *((int *)ctx);
+    int ret = sceNetInetRecv(sock, buf, len, 0);
+    if (ret < 0) {
+        int err = sceNetInetGetErrno();
+        if (err == EAGAIN || err == EWOULDBLOCK) return MBEDTLS_ERR_SSL_WANT_READ;
+        return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
+    }
+    return ret;
 }
 
 void fetch_github_tls(void) {
     char *server_name = (char *)calloc(1, 128);
     char *request = (char *)calloc(1, 512);
-    char *ip_str = (char *)calloc(1, 64);
-    if (!server_name || !request || !ip_str) return;
+    if (!server_name || !request) return;
 
     sprintf(server_name, "%s.%s.%s", "raw", "githubusercontent", "com");
-    const char *server_port = "443";
 
     sprintf(request,
         "GET /PSP-Archive/ARK-4/main/README.md HTTP/1.1\r\n"
@@ -174,24 +191,49 @@ void fetch_github_tls(void) {
         "User-Agent: PSP-Store/1.0\r\n"
         "Connection: close\r\n\r\n", server_name);
 
+    struct in_addr server_addr;
     printf("Resolving DNS for [%s]...\n", server_name);
-    int dns_res = resolve_hostname_psp(server_name, ip_str, 64);
+    int dns_res = resolve_hostname_addr(server_name, &server_addr);
     if (dns_res < 0) {
         printf("ERROR: DNS failed (0x%08X)\n", dns_res);
         free(server_name);
         free(request);
-        free(ip_str);
         return;
     }
-    printf("Resolved IP: %s\n", ip_str);
 
-    mbedtls_net_context server_fd;
+    unsigned char *b = (unsigned char *)&server_addr.s_addr;
+    printf("Resolved IP: %u.%u.%u.%u\n", *b, *(b + 1), *(b + 2), *(b + 3));
+
+    // PSPネイティブソケットを作成して443番ポートへ直接TCP接続
+    int sock = sceNetInetSocket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        printf("ERROR: Socket create failed (0x%08X)\n", sceNetInetGetErrno());
+        free(server_name);
+        free(request);
+        return;
+    }
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(443);
+    sa.sin_addr = server_addr;
+
+    printf("Connecting TCP port 443...\n");
+    if (sceNetInetConnect(sock, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        printf("ERROR: TCP connect failed (0x%08X)\n", sceNetInetGetErrno());
+        sceNetInetClose(sock);
+        free(server_name);
+        free(request);
+        return;
+    }
+    printf("TCP Connected! Starting TLS 1.3 handshake...\n");
+
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config conf;
 
-    mbedtls_net_init(&server_fd);
     mbedtls_ssl_init(&ssl);
     mbedtls_ssl_config_init(&conf);
     mbedtls_ctr_drbg_init(&ctr_drbg);
@@ -201,13 +243,6 @@ void fetch_github_tls(void) {
     if (mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
                               (const unsigned char *)pers, strlen(pers)) != 0) {
         printf("ERROR: ctr_drbg_seed failed\n");
-        goto cleanup;
-    }
-
-    printf("Connecting TCP to %s:%s...\n", ip_str, server_port);
-    int ret = mbedtls_net_connect(&server_fd, ip_str, server_port, MBEDTLS_NET_PROTO_TCP);
-    if (ret != 0) {
-        printf("ERROR: net_connect failed (-0x%x)\n", -ret);
         goto cleanup;
     }
 
@@ -227,9 +262,10 @@ void fetch_github_tls(void) {
     }
 
     mbedtls_ssl_set_hostname(&ssl, server_name);
-    mbedtls_ssl_set_bio(&ssl, &server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+    // PSPネイティブ送受信関数をmbedTLSに直結！
+    mbedtls_ssl_set_bio(&ssl, &sock, psp_bio_send, psp_bio_recv, NULL);
 
-    printf("Performing TLS 1.3 handshake...\n");
+    int ret;
     while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             printf("ERROR: handshake failed (-0x%x)\n", -ret);
@@ -254,10 +290,9 @@ void fetch_github_tls(void) {
     mbedtls_ssl_close_notify(&ssl);
 
 cleanup:
+    sceNetInetClose(sock);
     free(server_name);
     free(request);
-    free(ip_str);
-    mbedtls_net_free(&server_fd);
     mbedtls_ssl_free(&ssl);
     mbedtls_ssl_config_free(&conf);
     mbedtls_ctr_drbg_free(&ctr_drbg);
@@ -278,7 +313,7 @@ int main(void) {
 
     sceGuTerm();
     pspDebugScreenInit();
-    printf("PSP Store [v6] - Universal-Updater style\n\n");
+    printf("PSP Store [v7] - Universal-Updater style\n\n");
 
     if (net_err != 0) {
         printf("Network Init Error: 0x%08X\n", net_err);
