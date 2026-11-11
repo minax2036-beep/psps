@@ -23,7 +23,7 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 // メモリ節約のためヒープサイズを12MBに制限（15MB以下を確実に維持）
 PSP_HEAP_SIZE_KB(12 * 1024);
 
-static unsigned int __attribute__((aligned(16))) list;
+static unsigned int __attribute__((aligned(16))) list[262144];
 #define BUF_WIDTH (512)
 #define SCR_WIDTH (480)
 #define SCR_HEIGHT (272)
