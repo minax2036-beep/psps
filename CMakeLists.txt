@@ -1,9 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 project(NetDialogTest C)
 
-add_executable(${PROJECT_NAME} main.c)
+add_executable(${PROJECT_NAME} main.c font.c)
 
-# mbedTLS関連のライブラリを追加（リンク順が重要）
 target_link_libraries(${PROJECT_NAME}
     mbedtls
     mbedx509
@@ -12,6 +11,7 @@ target_link_libraries(${PROJECT_NAME}
     pspdisplay
     pspge
     psputility
+    pspctrl
     pspnet
     pspnet_inet
     pspnet_apctl
@@ -21,5 +21,5 @@ target_link_libraries(${PROJECT_NAME}
 
 create_pbp_file(
     TARGET ${PROJECT_NAME}
-    TITLE "GitHub TLS 1.3 Test"
+    TITLE "PSP Store"
 )
